@@ -15,7 +15,7 @@ use dav_server::{
     },
 };
 use futures_util::future::{ready, FutureExt};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 use crate::{
     cache::Cache,
     drive::{QuarkDrive, QuarkFile},
@@ -44,6 +44,7 @@ pub struct QuarkDriveFileSystem {
     skip_upload_same_size: bool,
     prefer_http_download: bool,
     upload_wait_timeout: u64,
+    temp_dir: PathBuf,
 }
 
 impl QuarkDriveFileSystem {
@@ -67,6 +68,7 @@ impl QuarkDriveFileSystem {
             skip_upload_same_size: false,
             prefer_http_download: false,
             upload_wait_timeout: 280,
+            temp_dir: PathBuf::from("/tmp"),
         })
     }
 
@@ -99,6 +101,13 @@ impl QuarkDriveFileSystem {
         self.upload_wait_timeout = upload_wait_timeout;
         self
     }
+
+    pub fn set_temp_dir(&mut self, temp_dir: PathBuf) -> &mut Self {
+        self.temp_dir = temp_dir;
+        self
+    }
+
+
     fn list_uploading_files(&self, parent_file_path: &str) -> Vec<QuarkFile> {
         self.uploading
             .get(parent_file_path)
@@ -190,6 +199,10 @@ impl DavFileSystem for QuarkDriveFileSystem {
                 error!(path = %path.display(), "unsupported write-append mode");
                 return Err(FsError::NotImplemented);
             }
+
+            // Take the slot before a single byte reaches temp_dir. Acquiring later —
+            // at flush, once the file is fully staged — would let unbounded staged
+            // files queue up for an upload slot, which is the very thing this caps.
             let parent_path = path.parent().ok_or(FsError::NotFound)?;
             let parent_file = self
                 .get_file(parent_path.to_path_buf())
@@ -277,6 +290,8 @@ impl DavFileSystem for QuarkDriveFileSystem {
             } else {
                 return Err(FsError::NotFound);
             };
+            dav_file.upload_state.declared_size = options.size;
+            dav_file.upload_state.streaming = options.write && options.size.is_some();
             dav_file.http_download = self.prefer_http_download;
             Ok(Box::new(dav_file) as Box<dyn DavFile>)
         }
@@ -333,8 +348,14 @@ impl DavFileSystem for QuarkDriveFileSystem {
             let mut file = self.get_file(path.clone()).await.unwrap_or_else(|_| Option::None);
             if file.is_none() {
                 let parent_path = path.parent().ok_or(FsError::NotFound)?;
+                let file_name = path
+                    .file_name()
+                    .ok_or(FsError::NotFound)?
+                    .to_string_lossy()
+                    .into_owned();
                 file = self.list_uploading_files(parent_path.to_str().unwrap())
-                    .first().cloned();
+                    .into_iter()
+                    .find(|f| f.file_name == file_name);
 
             };
 
@@ -608,7 +629,17 @@ struct UploadState {
     callback: Option<Callback>,
     is_uploading: bool,
     flush_count: u32,
-
+    /// Content-Length as declared by the client. Its presence is what makes
+    /// streaming possible: up_pre needs the total size before the first byte.
+    declared_size: Option<u64>,
+    /// Push parts to OSS as they arrive instead of staging the whole file first.
+    /// Reading only as fast as the upstream accepts makes TCP backpressure slow
+    /// the client down, which is the only thing that actually bounds disk here.
+    streaming: bool,
+    stream_started: bool,
+    part_buf: BytesMut,
+    part_number: u32,
+    etags: Vec<String>,
 }
 
 impl Default for UploadState {
@@ -632,6 +663,12 @@ impl Default for UploadState {
             callback: None,
             is_uploading: false,
             flush_count: 0,
+            declared_size: None,
+            streaming: false,
+            stream_started: false,
+            part_buf: BytesMut::new(),
+            part_number: 0,
+            etags: Vec::new(),
         }
     }
 }
@@ -646,6 +683,45 @@ struct QuarkDavFile {
     http_download: bool,
     md5_ctx: Md5Context,
     sha1_ctx: Sha1,
+}
+
+impl Drop for QuarkDavFile {
+    fn drop(&mut self) {
+        // A client that abandons a PUT mid-transfer never reaches flush(), so no
+        // other path removes what consume_buf() already staged. Left alone, each
+        // aborted upload leaks a full-size temp file and the concurrency cap stops
+        // bounding disk at all. do_flush() clears this path once the upload task
+        // owns the file, so a non-empty path here means nobody else will clean up.
+        // Streaming uploads stage nothing, but an abandoned one still leaves the
+        // placeholder entry behind, which would then answer metadata() forever.
+        let abandoned = !self.upload_state.is_finished
+            && (self.upload_state.is_uploading || self.upload_state.stream_started);
+        if abandoned {
+            if let Some(parent_path) = self.file.parent_path.as_ref() {
+                self.fs
+                    .remove_uploading_file(parent_path, &self.file.file_name);
+            }
+        }
+
+        let temp_path = std::mem::take(&mut self.upload_state.temp_file_path);
+        if temp_path.is_empty() {
+            return;
+        }
+
+        let file_name = self.file.file_name.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if tokio::fs::metadata(&temp_path).await.is_ok() {
+                    warn!(
+                        file_name = %file_name,
+                        temp_path = %temp_path,
+                        "upload abandoned before flush, removing staged file",
+                    );
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                }
+            });
+        }
+    }
 }
 
 impl Debug for QuarkDavFile {
@@ -696,9 +772,258 @@ impl QuarkDavFile {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis();
-            self.upload_state.temp_file_path = format!("/tmp/{}_{}", timestamp, self.file.file_name);
+            self.upload_state.temp_file_path = self
+                .fs
+                .temp_dir
+                .join(format!("{}_{}", timestamp, self.file.file_name))
+                .to_string_lossy()
+                .into_owned();
         }
         Ok(true)
+    }
+
+    /// Open an OSS multipart upload before any byte has been seen. Possible only
+    /// because the client declared the length. The hash-based instant-upload probe
+    /// (up_hash) is necessarily skipped — it wants md5+sha1 of the whole file,
+    /// which by definition is not known yet.
+    async fn start_stream(&mut self) -> Result<(), FsError> {
+        let size = self.upload_state.declared_size.ok_or(FsError::GeneralFailure)?;
+
+        if !self.file.fid.is_empty() {
+            if self.fs.skip_upload_same_size && self.file.size == size {
+                debug!(file_name = %self.file.file_name, size = size,
+                       "skip uploading: same size");
+                self.upload_state.is_finished = true;
+                return Ok(());
+            }
+            if let Err(err) = self
+                .fs
+                .drive
+                .remove_file(&self.file.fid, !self.fs.no_trash)
+                .await
+            {
+                error!(file_name = %self.file.file_name, error = %err,
+                       "delete file before upload failed");
+            }
+        }
+
+        let res = self
+            .fs
+            .drive
+            .up_pre(&self.file.file_name, size, &self.parent_file_id)
+            .await
+            .map_err(|err| {
+                error!(file_name = %self.file.file_name, error = %err, "up_pre failed");
+                FsError::GeneralFailure
+            })?;
+
+        if res.data.finish {
+            // 秒传
+            self.upload_state.is_finished = true;
+            return Ok(());
+        }
+
+        self.upload_state.auth_info = res.data.auth_info;
+        self.upload_state.callback = Some(res.data.callback.clone());
+        self.upload_state.task_id = res.data.task_id.clone();
+        self.upload_state.upload_url = res
+            .data
+            .upload_url
+            .strip_prefix("https://")
+            .or_else(|| res.data.upload_url.strip_prefix("http://"))
+            .unwrap_or(&res.data.upload_url)
+            .to_string();
+        self.upload_state.bucket = res.data.bucket;
+        self.upload_state.obj_key = res.data.obj_key;
+        if res.data.format_type != "" {
+            self.upload_state.mime_type = res.data.format_type;
+        }
+        self.file.fid = res.data.fid.clone();
+        self.upload_state.size = size;
+        self.upload_state.chunk_size = res.metadata.part_size;
+        let Some(upload_id) = res.data.upload_id else {
+            error!(file_name = %self.file.file_name, "up_pre returned no upload_id");
+            return Err(FsError::GeneralFailure);
+        };
+        self.upload_state.upload_id = upload_id;
+
+        info!(
+            file_name = %self.file.file_name,
+            size = size,
+            part_size = self.upload_state.chunk_size,
+            "upload: streaming to cloud, no local staging",
+        );
+        Ok(())
+    }
+
+    /// Send one part straight from memory. Ok(false) means the server declared the
+    /// object already complete and no further parts are wanted.
+    async fn upload_stream_part(&mut self, part: Vec<u8>) -> Result<bool, FsError> {
+        // Every byte passes through here exactly once, in order, so folding the
+        // digests here yields the same md5/sha1 the staged path computes.
+        self.md5_ctx.consume(&part);
+        self.sha1_ctx.update(&part);
+
+        self.upload_state.part_number += 1;
+        let part_number = self.upload_state.part_number;
+
+        let now: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
+        let utc_time = now.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let mime_type = self.upload_state.mime_type.clone();
+        let bucket = self.upload_state.bucket.clone();
+        let obj_key = self.upload_state.obj_key.clone();
+        let upload_id = self.upload_state.upload_id.clone();
+        let task_id = self.upload_state.task_id.clone();
+        let auth_info = self.upload_state.auth_info.clone();
+
+        let auth_meta = self
+            .fs
+            .drive
+            .up_part_auth_meta(&mime_type, &utc_time, &bucket, &obj_key, part_number, &upload_id)
+            .await
+            .map_err(|err| {
+                error!(file_name = %self.file.file_name, error = %err, "get upload part auth meta failed");
+                FsError::GeneralFailure
+            })?;
+
+        let auth_res = self
+            .fs
+            .drive
+            .auth(&auth_info, &auth_meta, &task_id)
+            .await
+            .map_err(|err| {
+                error!(file_name = %self.file.file_name, error = %err, "auth upload part failed");
+                FsError::GeneralFailure
+            })?;
+
+        let req = UpPartMethodRequest {
+            auth_key: auth_res.data.auth_key,
+            mime_type,
+            utc_time,
+            bucket,
+            upload_url: self.upload_state.upload_url.clone(),
+            obj_key,
+            part_number,
+            upload_id,
+            part_bytes: part,
+        };
+
+        let etag = self
+            .fs
+            .drive
+            .up_part(req)
+            .await
+            .map_err(|err| {
+                error!(file_name = %self.file.file_name, part = part_number, error = %err, "upload part failed");
+                FsError::GeneralFailure
+            })?
+            .ok_or(FsError::GeneralFailure)?;
+
+        if etag == "finish" {
+            self.upload_state.is_finished = true;
+            return Ok(false);
+        }
+        self.upload_state.etags.push(etag);
+        Ok(true)
+    }
+
+    async fn stream_write(&mut self, buf: Box<dyn Buf + Send>) -> Result<(), FsError> {
+        if self.upload_state.is_finished {
+            // Instant upload or same-size skip: drain the client without storing.
+            return Ok(());
+        }
+        if !self.upload_state.stream_started {
+            self.upload_state.stream_started = true;
+            self.start_stream().await?;
+            if self.upload_state.is_finished {
+                return Ok(());
+            }
+        }
+
+        self.upload_state.part_buf.put(buf);
+        let part_size = self.upload_state.chunk_size as usize;
+        if part_size == 0 {
+            error!(file_name = %self.file.file_name, "up_pre returned part_size 0");
+            return Err(FsError::GeneralFailure);
+        }
+        while self.upload_state.part_buf.len() >= part_size {
+            let part = self.upload_state.part_buf.split_to(part_size).to_vec();
+            if !self.upload_stream_part(part).await? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn stream_flush(&mut self) -> Result<(), FsError> {
+        if self.upload_state.is_finished {
+            self.after_flush().await?;
+            return Ok(());
+        }
+        if !self.upload_state.stream_started {
+            // Opened for write but nothing was ever sent.
+            return Ok(());
+        }
+        if !self.upload_state.part_buf.is_empty() {
+            let part = self.upload_state.part_buf.split().to_vec();
+            self.upload_stream_part(part).await?;
+        }
+
+        // up_hash is not just an instant-upload probe: it registers the digests
+        // that Quark's OSS callback validates against, and without it the commit
+        // fails with CallbackFailed. Streaming only moves it after the parts —
+        // that is the earliest point the whole-file digests exist.
+        if !self.upload_state.is_finished {
+            let md5 = format!("{:x}", self.md5_ctx.clone().compute());
+            let sha1 = format!("{:x}", self.sha1_ctx.clone().finalize());
+            let task_id = self.upload_state.task_id.clone();
+            let hash_res = self
+                .fs
+                .drive
+                .up_hash(&md5, &sha1, &task_id)
+                .await
+                .map_err(|err| {
+                    error!(file_name = %self.file.file_name, error = %err, "hash file failed");
+                    FsError::GeneralFailure
+                })?;
+            if hash_res.data.finish {
+                self.upload_state.is_finished = true;
+            }
+        }
+
+        if !self.upload_state.is_finished {
+            let callback = self
+                .upload_state
+                .callback
+                .clone()
+                .ok_or(FsError::GeneralFailure)?;
+            let commit_req = UpAuthAndCommitRequest {
+                md5s: self.upload_state.etags.clone(),
+                callback,
+                bucket: self.upload_state.bucket.clone(),
+                obj_key: self.upload_state.obj_key.clone(),
+                upload_id: self.upload_state.upload_id.clone(),
+                auth_info: self.upload_state.auth_info.clone(),
+                task_id: self.upload_state.task_id.clone(),
+                upload_url: self.upload_state.upload_url.clone(),
+            };
+            self.fs
+                .drive
+                .up_auth_and_commit(commit_req)
+                .await
+                .map_err(|err| {
+                    error!(file_name = %self.file.file_name, error = %err, "commit upload failed");
+                    FsError::GeneralFailure
+                })?;
+            let obj_key = self.upload_state.obj_key.clone();
+            let task_id = self.upload_state.task_id.clone();
+            self.fs.drive.finish(&obj_key, &task_id).await.map_err(|err| {
+                error!(file_name = %self.file.file_name, error = %err, "finish upload failed");
+                FsError::GeneralFailure
+            })?;
+        }
+        self.after_flush().await?;
+        Ok(())
     }
 
     async fn do_flush(&mut self) -> Result<(), FsError> {
@@ -804,6 +1129,10 @@ impl QuarkDavFile {
         // If the client disconnects (e.g. timeout), the spawned task continues uploading.
         let drive = self.fs.drive.clone();
         let upload_state = self.upload_state.clone();
+        // Hand the staged file over to the upload task: clearing our copy of the
+        // path tells the Drop guard below that this file is no longer ours to
+        // delete, so it can never yank the file out from under an active upload.
+        self.upload_state.temp_file_path.clear();
         let file_name = self.file.file_name.clone();
         let parent_path = self.file.parent_path.as_ref().unwrap().clone();
         let parent_dir = self.parent_dir.clone();
@@ -1285,6 +1614,9 @@ impl DavFile for QuarkDavFile {
     fn write_buf(&mut self, buf: Box<dyn bytes::Buf + Send>) -> FsFuture<()>{
         debug!(file_id = %self.file.fid, file_name = %self.file.file_name, "file: write_buf");
         async move {
+            if self.upload_state.streaming {
+                return self.stream_write(buf).await;
+            }
             if self.prepare_for_upload().await? {
                 self.upload_state.buffer.put(buf);
                 self.consume_buf().await?;
@@ -1357,6 +1689,16 @@ impl DavFile for QuarkDavFile {
             //     // self.upload_mini_byte_file().await?;
             //     // return Ok(());
             // }
+
+            if self.upload_state.streaming {
+                let res = self.stream_flush().await;
+                if let Err(err) = res {
+                    error!(file_id = %self.file.fid, file_name = %self.file.file_name, error = %err, "file: stream flush failed");
+                    self.after_flush().await?;
+                    return Err(err);
+                }
+                return Ok(());
+            }
 
             if !self.upload_state.is_uploading {
                 debug!(file_id = %self.file.fid, file_name = %self.file.file_name, "file: flush - no temp file path");

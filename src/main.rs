@@ -106,6 +106,13 @@ struct Opt {
     /// Set to 0 to wait indefinitely. Defaults to 280 seconds.
     #[arg(long, env = "UPLOAD_WAIT_TIMEOUT", default_value = "280")]
     upload_wait_timeout: u64,
+
+    /// Directory used to stage in-progress uploads. Must have room for every
+    /// concurrently uploading file. Defaults to /tmp, which is tmpfs (RAM) on
+    /// some hosts — point this at real storage when uploading large files.
+    #[arg(long, env = "UPLOAD_TEMP_DIR", default_value = "/tmp")]
+    temp_dir: PathBuf,
+
 }
 
 #[derive(Subcommand, Debug)]
@@ -188,7 +195,8 @@ async fn main() -> anyhow::Result<()> {
         .set_upload_buffer_size(opt.upload_buffer_size)
         .set_skip_upload_same_size(opt.skip_upload_same_size)
         .set_prefer_http_download(opt.prefer_http_download)
-        .set_upload_wait_timeout(opt.upload_wait_timeout);
+        .set_upload_wait_timeout(opt.upload_wait_timeout)
+        .set_temp_dir(opt.temp_dir);
     let cache = Arc::new(fs.dir_cache.clone());
     start_periodic_invalidate(cache.clone(), opt.refresh_cache_secs_interval);
     let fs_for_browser = fs.clone();
