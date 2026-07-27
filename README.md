@@ -1,8 +1,16 @@
 # quarkdrive-webdav
 夸克网盘 WebDAV 服务
 
-[![Docker Image](https://img.shields.io/badge/version-latest-blue)](https://ghcr.io/chenqimiao/quarkdrive-webdav)
-[![Crates.io](https://img.shields.io/crates/v/quarkdrive-webdav.svg)](https://crates.io/crates/quarkdrive-webdav)
+> **本仓库 fork 自 [chenqimiao/quarkdrive-webdav](https://github.com/chenqimiao/quarkdrive-webdav)**，围绕"把上传做对"做了如下改动：
+>
+> - **上传改为流式**。原实现先把整个文件写进本地暂存目录、收完再上传；局域网接收速度远快于上行带宽，大文件同步必然堆积（实测堆到过 20GB）。现在边收边推，不落盘。
+> - **修掉"上传成功却查不到文件"**。上传完成后有两个竞态会让客户端在 PUT 刚成功时收到 404：夸克后端的最终一致性窗口，以及目录缓存"先读后写"期间被失效冲掉、导致旧列表复活。现在会确认文件确实出现在目录列表里，才向客户端返回成功。
+> - **目录列表并发合并**。同一目录的并发查询共用一次请求，不再每个请求都向夸克拉一遍全量列表。
+> - **实测兼容群晖 Cloud Sync 上传**。含客户端加密的同步任务，从 KB 级字幕到 4.76GB 视频全部通过。
+>
+> 上游的功能与用法保持不变，下面的文档同样适用。
+
+[![Docker Image](https://img.shields.io/badge/version-latest-blue)](https://github.com/zmzhuai/quarkdrive-webdav)
 
  
  ## 核心特性
@@ -16,47 +24,23 @@
 
 
 
-如果项目对你有帮助，欢迎 Star 或者赞助我，以支持本项目的继续开发
-
-## 支付码
-
-<p align="center">
-  <img src="https://github.com/chenqimiao/chenqimiao/raw/main/pic/alipay.JPG" alt="alipay" width="400" height="400" style="margin-right: 40px;"/>
-  <img src="https://github.com/chenqimiao/chenqimiao/raw/main/pic/wechat_pay.JPG" alt="wechat_pay" width="400" height="400"/>
-</p>
-
-## 💖 鸣谢捐赠
-
-衷心感谢以下朋友的支持，正是你们的鼓励让本项目得以持续迭代 🙏
-
-| 日期 | 渠道 | 捐赠者 | 金额 |
-| :---: | :---: | :---: | :---: |
-| 2026-06-06 | WeChat | J\*o | ¥100.00 |
-| 2026-03-26 | WeChat | M\*u | ¥50.00 |
-| 2026-03-25 | WeChat | \*途 | ¥10.00 |
-| 2025-08-06 | WeChat | \*平 | ¥18.50 |
-| 2025-05-04 | WeChat | L\*s | ¥100.00 |
-| 2025-01-07 | WeChat | \*良 | ¥25.00 |
-| **合计** |  | **5 位** | **¥303.50** |
-
-
-> **Note**
->
-> 本项目作者没有上传需求, 所以上传实现较为简单，测试场景不能全部覆盖，后续会慢慢优化
-
 ## 二进制安装
 
 ### 从 GitHub Releases 下载
 
-可以从 [GitHub Releases](https://github.com/chenqimiao/quarkdrive-webdav/releases) 页面下载预先构建的二进制包，支持 Linux、macOS、Windows 多平台。
+上游的 [GitHub Releases](https://github.com/chenqimiao/quarkdrive-webdav/releases) 提供 Linux、macOS、Windows 多平台的预构建包，但**不含本仓库的改动**。
 
-### 通过 Cargo 安装
+本仓库的发布流程是 `workflow_dispatch` 手动触发的，[Releases](https://github.com/zmzhuai/quarkdrive-webdav/releases) 页面在跑过一次之前是空的。
 
-如果已安装 [Rust](https://www.rust-lang.org/tools/install) 工具链，可以直接通过 Cargo 安装：
+### 从源码构建
+
+已装 [Rust](https://www.rust-lang.org/tools/install) 工具链的话：
 
 ```bash
-cargo install quarkdrive-webdav
+cargo install --git https://github.com/zmzhuai/quarkdrive-webdav
 ```
+
+注意 `cargo install quarkdrive-webdav`（不带 `--git`）装的是 crates.io 上的上游版本，同样不含本仓库的改动。
 
 ## 命令行启动
 
@@ -67,13 +51,21 @@ quarkdrive-webdav --quark-cookie '你的cookie' -U '用户名' -W '密码' -p 80
 
 ## Docker 
 
+本仓库没有发布预构建镜像，先用仓库根目录的 `Dockerfile` 自己构建一个（它从源码编译，产物是静态 musl 二进制，能跑在 DSM 7 这种 4.4 内核上）：
+
+```bash
+docker build -t quarkdrive-webdav:local .
+```
+
+> 上游的 `ghcr.io/chenqimiao/quarkdrive-webdav:latest` 可以直接拉取，但**不含本仓库的改动**。
+
 ### docker run
 ```bash
 docker run -d --name=quarkdrive-webdav --restart=unless-stopped -p 8080:8080 \
   -e QUARK_COOKIE='your quark cookie' \
   -e WEBDAV_AUTH_USER=admin \
   -e WEBDAV_AUTH_PASSWORD=admin \
-  ghcr.io/chenqimiao/quarkdrive-webdav:latest
+  quarkdrive-webdav:local
 ```
 
 ### docker compose
@@ -82,7 +74,8 @@ docker run -d --name=quarkdrive-webdav --restart=unless-stopped -p 8080:8080 \
 version: '3.8'
 services:
   quarkdrive-webdav:
-    image: ghcr.io/chenqimiao/quarkdrive-webdav:latest
+    image: quarkdrive-webdav:local
+    build: .
     container_name: quarkdrive-webdav
     restart: unless-stopped
     ports:
@@ -127,7 +120,9 @@ services:
 
 ### 群晖 Cloud Sync
 
-已针对群晖 Cloud Sync 实测（含客户端加密、双向同步）。加密只改变文件内容与大小，不改变文件名，`Content-Length` 始终存在，因此走流式路径。
+已针对群晖 Cloud Sync 实测（含客户端加密、双向同步），文件大小从 KB 级字幕到 4.76GB 视频。加密只改变文件内容与大小，不改变文件名，`Content-Length` 始终存在，因此走流式路径。
+
+Cloud Sync 会在 PUT 刚返回时立刻回头查这个文件，所以它对"上传成功但目录列表还没更新"零容忍 —— 表现是同步日志里偶发的**"上传失败。未找到远程文件"**。上传完成后确认文件可见再返回，就是为这个场景加的。
 
 需要注意的是，**Cloud Sync 的客户端加密使同一文件每次加密的结果都不同**，云端秒传因而无法命中，每次重新同步都是全量重传。这是加密本身的性质，流式上传使其只消耗带宽，不再消耗本地磁盘。
 
