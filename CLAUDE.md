@@ -25,9 +25,11 @@ cargo run -- --quark-cookie '...' -U admin -W admin -p 8080 --debug
 
 Tests print diagnostics to stderr (`eprintln!`) even when green — read it, live tests report skips and API anomalies that way.
 
-`docker/Dockerfile` cannot be built standalone: it `COPY`s `bin/${TARGETARCH}/quarkdrive-webdav`, a musl binary cross-compiled by `.github/workflows/docker.yml` beforehand. Both release workflows are `workflow_dispatch`-only.
+`docker/Dockerfile` cannot be built standalone: it `COPY`s `bin/${TARGETARCH}/quarkdrive-webdav`, a musl binary cross-compiled by `.github/workflows/docker.yml` beforehand. The root `Dockerfile` builds from source and works on its own.
 
-`.bumpversion.cfg` is stale — its `current_version` (2.3.3) disagrees with `Cargo.toml` (1.3.9) and it lists `openwrt/` and `snap/` files that don't exist here. Bump `Cargo.toml` by hand.
+Releasing goes through `scripts/release.sh <version>`, which rewrites the `Cargo.toml` version, tests, commits, tags `v<version>` and pushes. Both release workflows fire on `v*` tags (and can still be dispatched manually): `docker.yml` pushes multi-arch images to `ghcr.io/<owner>/quarkdrive-webdav`, tagging `:latest` only for tag builds; `release.yml` builds six target triples and attaches them to a GitHub Release.
+
+`.bumpversion.cfg` is stale — its `current_version` (2.3.3) disagrees with `Cargo.toml` and it lists `openwrt/` and `snap/` files that don't exist here. Nothing reads it; `scripts/release.sh` edits `Cargo.toml` directly.
 
 ## Architecture
 

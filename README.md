@@ -28,9 +28,9 @@
 
 ### 从 GitHub Releases 下载
 
-上游的 [GitHub Releases](https://github.com/chenqimiao/quarkdrive-webdav/releases) 提供 Linux、macOS、Windows 多平台的预构建包，但**不含本仓库的改动**。
+[本仓库的 Releases](https://github.com/zmzhuai/quarkdrive-webdav/releases) 提供 Linux、macOS、Windows 六个平台的预构建包。
 
-本仓库的发布流程是 `workflow_dispatch` 手动触发的，[Releases](https://github.com/zmzhuai/quarkdrive-webdav/releases) 页面在跑过一次之前是空的。
+上游的 [Releases](https://github.com/chenqimiao/quarkdrive-webdav/releases) 也有，但**不含本仓库的改动**。
 
 ### 从源码构建
 
@@ -51,13 +51,15 @@ quarkdrive-webdav --quark-cookie '你的cookie' -U '用户名' -W '密码' -p 80
 
 ## Docker 
 
-本仓库没有发布预构建镜像，先用仓库根目录的 `Dockerfile` 自己构建一个（它从源码编译，产物是静态 musl 二进制，能跑在 DSM 7 这种 4.4 内核上）：
+镜像发布在 `ghcr.io/zmzhuai/quarkdrive-webdav`，支持 amd64 与 arm64。`:latest` 跟随最新一次发版。
+
+> 上游的 `ghcr.io/chenqimiao/quarkdrive-webdav:latest` 也可以拉，但**不含本仓库的改动**。
+
+也可以用仓库根目录的 `Dockerfile` 自己构建 —— 它从源码编译，产物是静态 musl 二进制，能跑在 DSM 7 这种 4.4 内核上：
 
 ```bash
 docker build -t quarkdrive-webdav:local .
 ```
-
-> 上游的 `ghcr.io/chenqimiao/quarkdrive-webdav:latest` 可以直接拉取，但**不含本仓库的改动**。
 
 ### docker run
 ```bash
@@ -65,7 +67,7 @@ docker run -d --name=quarkdrive-webdav --restart=unless-stopped -p 8080:8080 \
   -e QUARK_COOKIE='your quark cookie' \
   -e WEBDAV_AUTH_USER=admin \
   -e WEBDAV_AUTH_PASSWORD=admin \
-  quarkdrive-webdav:local
+  ghcr.io/zmzhuai/quarkdrive-webdav:latest
 ```
 
 ### docker compose
@@ -74,8 +76,7 @@ docker run -d --name=quarkdrive-webdav --restart=unless-stopped -p 8080:8080 \
 version: '3.8'
 services:
   quarkdrive-webdav:
-    image: quarkdrive-webdav:local
-    build: .
+    image: ghcr.io/zmzhuai/quarkdrive-webdav:latest
     container_name: quarkdrive-webdav
     restart: unless-stopped
     ports:
@@ -125,6 +126,14 @@ services:
 Cloud Sync 会在 PUT 刚返回时立刻回头查这个文件，所以它对"上传成功但目录列表还没更新"零容忍 —— 表现是同步日志里偶发的**"上传失败。未找到远程文件"**。上传完成后确认文件可见再返回，就是为这个场景加的。
 
 需要注意的是，**Cloud Sync 的客户端加密使同一文件每次加密的结果都不同**，云端秒传因而无法命中，每次重新同步都是全量重传。这是加密本身的性质，流式上传使其只消耗带宽，不再消耗本地磁盘。
+
+## 发版
+
+```bash
+scripts/release.sh 1.4.0
+```
+
+改 `Cargo.toml` 版本号、跑测试、提交、打 `v1.4.0` 的 tag，确认后推送。tag 推上去会触发两个 workflow：多架构镜像推到 ghcr（同时更新 `:latest`），六个平台的二进制发到 Releases。
 
 ## 🚨 免责声明
 

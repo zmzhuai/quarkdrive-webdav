@@ -1,19 +1,22 @@
 name: Build binary package
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       release_body:
         description: 'Release 描述（可选）'
         required: false
         default: ''
-  # push:
-  #   tags:
-  #     - '*'
+
+# 创建 Release 需要写 contents
+permissions:
+  contents: write
 
 jobs:
   build:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -37,11 +40,11 @@ jobs:
         with:
           ref: ${{ github.ref_name }}
 
+      # actions-rs 已归档且跑在 Node 16 上，换成 docker.yml 里已经在用的那个
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          target: ${{ matrix.target }}
+          targets: ${{ matrix.target }}
 
       - name: Install OpenSSL (x86_64-unknown-linux-gnu)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -88,20 +91,15 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/quarkdrive-webdav.exe" -Destination dist/
           Compress-Archive -Path dist/* -DestinationPath "quarkdrive-webdav-${{ matrix.target }}.zip"
 
+      # 六个矩阵任务都跑这一步：第一个创建 Release，其余的往上追加自己的产物
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
+          # 不写死就会取 github.ref，从分支手动触发时那不是 tag，Release 建不出来
+          tag_name: ${{ github.ref_name }}
           files: |
             quarkdrive-webdav-${{ matrix.target }}.*
           body: ${{ github.event.inputs.release_body }}
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 设置 Release 名称
-        if: matrix.os != 'windows-latest'
-        id: release_vars
-        run: |
-          echo "name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-
-      # 你可以在后续创建 Release 的步骤中使用 ${{ steps.release_vars.outputs.name }} 作为 release 名称
-      # ${{ github.event.inputs.release_body }} 可作为 release 描述
