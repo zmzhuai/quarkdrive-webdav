@@ -20,7 +20,7 @@
 - 🔄 NAS 与云盘双向同步 - 支持 NAS 与云盘间文件基于WebDAV协议的备份、下载、上传操作
 - 🎬 云盘影音无缝播放 - 完美适配  [Infuse](https://firecore.com/infuse)、[nPlayer](https://nplayer.com) 等支持 WebDAV 协议的客户端 App直接播放云盘内容
 - 🚀 流式上传 - 边接收边推送到云端，不在本地落盘。上传数十 GB 的文件也不会产生本地缓存，客户端并发数可随意设置
-- 📁 群晖 Cloud Sync 兼容 - 已针对群晖 Cloud Sync（含客户端加密）实测调优，大文件同步不再出现缓存堆积或"配额已达上限"中断
+- 📁 群晖 Cloud Sync 兼容 - 已针对群晖 Cloud Sync（含客户端加密）实测调优，大文件同步不再出现超时不断重试上传失败的问题。
 
 
 
