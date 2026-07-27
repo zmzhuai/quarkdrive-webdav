@@ -27,9 +27,9 @@ Tests print diagnostics to stderr (`eprintln!`) even when green — read it, liv
 
 `docker/Dockerfile` cannot be built standalone: it `COPY`s `bin/${TARGETARCH}/quarkdrive-webdav`, a musl binary cross-compiled by `.github/workflows/docker.yml` beforehand. The root `Dockerfile` builds from source and works on its own.
 
-Releasing goes through `scripts/release.sh <version>`, which rewrites the `Cargo.toml` version, tests, commits, tags `v<version>` and pushes. Both release workflows fire on `v*` tags (and can still be dispatched manually): `docker.yml` pushes multi-arch images to `ghcr.io/<owner>/quarkdrive-webdav`, tagging `:latest` only for tag builds; `release.yml` builds six target triples and attaches them to a GitHub Release.
+Releasing is bump `Cargo.toml`, commit, then create a `v*` release/tag (`gh release create v1.4.0 --generate-notes`, or the GitHub UI). Both release workflows fire on `v*` tags and can still be dispatched manually: `docker.yml` pushes multi-arch images to `ghcr.io/<owner>/quarkdrive-webdav`, tagging `:latest` only for tag builds; `release.yml` builds six target triples and attaches them to the Release. Both refuse to publish if the tag disagrees with the `Cargo.toml` version, or if `cargo test` fails — that gate is in CI rather than a local script because a tag can be created from the GitHub UI, where nothing local runs.
 
-`.bumpversion.cfg` is stale — its `current_version` (2.3.3) disagrees with `Cargo.toml` and it lists `openwrt/` and `snap/` files that don't exist here. Nothing reads it; `scripts/release.sh` edits `Cargo.toml` directly.
+`.bumpversion.cfg` is stale — its `current_version` (2.3.3) disagrees with `Cargo.toml` and it lists `openwrt/` and `snap/` files that don't exist here. Nothing reads it; bump `Cargo.toml` by hand.
 
 ## Architecture
 

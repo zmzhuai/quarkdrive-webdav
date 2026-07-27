@@ -16,7 +16,31 @@ permissions:
   contents: write
 
 jobs:
+  # 发布前的闸门。放在 CI 而不是本地脚本里，是因为 tag 可以从任何地方推上来
+  # —— 网页上点一次「Draft a new release」也算，那时候本地什么都不会执行。
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # tag 决定对外的版本号，Cargo.toml 决定 --version 打印什么。
+      # 两者不一致就是发布了一个会报错版本的二进制。
+      - name: 校验 tag 与 Cargo.toml 版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          crate="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag 是 $tag，Cargo.toml 里是 $crate。先提交版本号改动，再打 tag。"
+            exit 1
+          fi
+
+      - run: cargo test
+
   build:
+    needs: check
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

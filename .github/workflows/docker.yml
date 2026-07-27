@@ -31,6 +31,19 @@ jobs:
         with:
           key: docker-musl
 
+      # 同 release.yml：镜像 tag 和二进制里的版本号必须对得上
+      - name: 校验 tag 与 Cargo.toml 版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          crate="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag 是 $tag，Cargo.toml 里是 $crate。先提交版本号改动，再打 tag。"
+            exit 1
+          fi
+
+      - run: cargo test
+
       - name: 安装交叉编译工具链
         run: sudo apt-get update && sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
 

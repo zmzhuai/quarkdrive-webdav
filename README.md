@@ -123,11 +123,16 @@ Cloud Sync 会在 PUT 刚返回时立刻回头查这个文件，所以它对"上
 
 ## 发版
 
+1. 改 `Cargo.toml` 里的版本号并提交
+2. 建 Release —— 网页上点「Draft a new release」新建一个 `v1.4.0` 的 tag，或者：
+
 ```bash
-scripts/release.sh 1.4.0
+gh release create v1.4.0 --generate-notes
 ```
 
-改 `Cargo.toml` 版本号、跑测试、提交、打 `v1.4.0` 的 tag，确认后推送。tag 推上去会触发两个 workflow：多架构镜像推到 ghcr（同时更新 `:latest`），六个平台的二进制发到 Releases。
+tag 推上去会触发两个 workflow：多架构镜像推到 ghcr（同时更新 `:latest`），六个平台的二进制发到 Releases。
+
+两个 workflow 都会先校验 tag 与 `Cargo.toml` 的版本号一致、跑一遍测试，对不上就中止 —— 免得发出去的二进制 `--version` 报的是别的版本。
 
 ## 🚨 免责声明
 
