@@ -28,9 +28,7 @@
 
 ### 从 GitHub Releases 下载
 
-[本仓库的 Releases](https://github.com/zmzhuai/quarkdrive-webdav/releases) 提供 Linux、macOS、Windows 六个平台的预构建包。
-
-上游的 [Releases](https://github.com/chenqimiao/quarkdrive-webdav/releases) 也有，但**不含本仓库的改动**。
+[Releases](https://github.com/zmzhuai/quarkdrive-webdav/releases) 页面提供 Linux、macOS、Windows 六个平台的预构建包。
 
 ### 从源码构建
 
@@ -39,8 +37,6 @@
 ```bash
 cargo install --git https://github.com/zmzhuai/quarkdrive-webdav
 ```
-
-注意 `cargo install quarkdrive-webdav`（不带 `--git`）装的是 crates.io 上的上游版本，同样不含本仓库的改动。
 
 ## 命令行启动
 
@@ -52,8 +48,6 @@ quarkdrive-webdav --quark-cookie '你的cookie' -U '用户名' -W '密码' -p 80
 ## Docker 
 
 镜像发布在 `ghcr.io/zmzhuai/quarkdrive-webdav`，支持 amd64 与 arm64。`:latest` 跟随最新一次发版。
-
-> 上游的 `ghcr.io/chenqimiao/quarkdrive-webdav:latest` 也可以拉，但**不含本仓库的改动**。
 
 也可以用仓库根目录的 `Dockerfile` 自己构建 —— 它从源码编译，产物是静态 musl 二进制，能跑在 DSM 7 这种 4.4 内核上：
 
