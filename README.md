@@ -130,7 +130,7 @@ Cloud Sync 会在 PUT 刚返回时立刻回头查这个文件，所以它对"上
 gh release create v1.4.0 --generate-notes
 ```
 
-tag 推上去会触发两个 workflow：多架构镜像推到 ghcr（同时更新 `:latest`），六个平台的二进制发到 Releases。
+发布这一下会触发两个 workflow：多架构镜像推到 ghcr（同时更新 `:latest`），六个平台的二进制挂到这个 Release 上。Release 的标题和正文由你创建时决定，CI 不碰。
 
 两个 workflow 都会先校验 tag 与 `Cargo.toml` 的版本号一致、跑一遍测试，对不上就中止 —— 免得发出去的二进制 `--version` 报的是别的版本。
 

@@ -1,23 +1,19 @@
 name: Build binary package
 
+# 由「发布 Release」触发，而不是 tag 推送：Release 的标题和正文由发布者决定，
+# 这个 workflow 只负责把六个平台的产物挂上去。
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
   workflow_dispatch:
-    inputs:
-      release_body:
-        description: 'Release 描述（可选）'
-        required: false
-        default: ''
 
-# 创建 Release 需要写 contents
+# 往 Release 上传产物需要写 contents
 permissions:
   contents: write
 
 jobs:
-  # 发布前的闸门。放在 CI 而不是本地脚本里，是因为 tag 可以从任何地方推上来
-  # —— 网页上点一次「Draft a new release」也算，那时候本地什么都不会执行。
+  # 发布前的闸门。放在 CI 而不是本地脚本里，是因为发布可以从任何地方发起
+  # —— 网页上点一次「Publish release」也算，那时候本地什么都不会执行。
   check:
     runs-on: ubuntu-latest
     steps:
@@ -115,7 +111,8 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/quarkdrive-webdav.exe" -Destination dist/
           Compress-Archive -Path dist/* -DestinationPath "quarkdrive-webdav-${{ matrix.target }}.zip"
 
-      # 六个矩阵任务都跑这一步：第一个创建 Release，其余的往上追加自己的产物
+      # 六个矩阵任务都会跑这一步，所以这里只能挂产物，不能碰正文 ——
+      # 带上 body 或 generate_release_notes 的话，正文会被追加六遍。
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
@@ -123,7 +120,5 @@ jobs:
           tag_name: ${{ github.ref_name }}
           files: |
             quarkdrive-webdav-${{ matrix.target }}.*
-          body: ${{ github.event.inputs.release_body }}
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
